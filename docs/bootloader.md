@@ -2,14 +2,14 @@
 
 ## Memory Layout
 
-The bootloader assumes the standard BIOS entry point.
+The bootloader assumes the standard BIOS entry point, but now acts as a stage-1 loader to fetch the kernel.
 
 | Memory Address | Component | Description |
 | :--- | :--- | :--- |
-| `0x7C00` | Real Mode Entry | The BIOS loads the sector here. |
-| `0x7C40` | PM Entry | Target of the Far Jump after mode switch. |
-| `0x7D90` | GDT | The Global Descriptor Table data. |
-| `0xB8000` | Video Memory | VGA text mode buffer (Protected Mode). |
+| `0x1000` | Kernel Load Address | Destination where the kernel (sectors 2-11) is loaded. |
+| `0x7C00` | Real Mode Entry | The BIOS loads the boot sector here. |
+| `0x7C60` | PM Entry | Target of the Far Jump after mode switch (Offset 96). |
+| `0x7D90` | GDT | The Global Descriptor Table data (Offset 400). |
 
 ## Logic Flow
 
@@ -34,33 +34,35 @@ Protected Mode requires a GDT to define memory segments. The script constructs t
 
 ### 3. Real Mode (16-bit)
 Located at `0x7C00`. The code performs the following steps:
-1.  **`CLI`**: Disable interrupts to prevent crashes during the mode switch.
+1.  **`CLI`**: Disable interrupts.
 2.  **Segment Init**: Zeros out `AX`, `DS`, `ES`, and `SS`.
-3.  **Stack Setup**: Sets the Stack Pointer (`SP`) to `0x7C00` (growing downwards).
-4.  **`LGDT`**: Loads the GDT Register using the structure placed at offset 400.
-5.  **Enter Protected Mode**: 
+3.  **Stack Setup**: Sets the Stack Pointer (`SP`) to `0x7C00`.
+4.  **Load Kernel**: 
+    *   Uses BIOS Interrupt `0x13`, Function `0x02`.
+    *   Reads **10 sectors** starting from Cylinder 0, Head 0, Sector 2.
+    *   Writes data to memory address `0x1000`.
+5.  **`CLI`**: Disable interrupts again (safety measure).
+6.  **`LGDT`**: Loads the GDT Register using the structure placed at offset 400.
+7.  **Enter Protected Mode**: 
     *   Moves `CR0` to `EAX`.
     *   ORs the value with `0x01` (Setting the PE bit).
     *   Moves the result back to `CR0`.
-6.  **Far Jump**: Executes `JMP 0x08:0x7C40`. This flushes the CPU pipeline and updates the Code Segment (`CS`) register to the new 32-bit selector.
+8.  **Far Jump**: Executes `JMP 0x08:0x7C60`. This flushes the CPU pipeline and updates `CS` to the 32-bit selector.
 
 ### 4. Protected Mode (32-bit)
-Located at `0x7C40` (Offset 64).
+Located at `0x7C60` (Offset 96).
 1.  **Segment Init**: Loads `DS`, `ES`, `SS`, `FS`, `GS` with the Data Selector (`0x10`).
-2.  **VGA Output**:
-    *   Sets `EDI` to `0xB8000` (Video Memory).
-    *   Loops through the provided message string.
-    *   Writes **Character Byte** followed by **Attribute Byte** (`0x1F`: White text on Blue background) directly to memory.
-3.  **Halt**: Executes `HLT` and loops forever (`JMP $`).
+2.  **Kernel Handover**:
+    *   Executes an absolute jump to `0x1000` (The location where the kernel was loaded).
 
 ## Binary Assembly
 
 The `mkos` function assembles the final 512-byte buffer in this order:
 
-1.  **Real Mode Code**: ~30 bytes.
-2.  **Padding 1**: Fills with zeros until offset `0x40` (64).
-3.  **Protected Mode Code**: The variable length payload.
+1.  **Real Mode Code**: Instructions for setup and disk reading.
+2.  **Padding 1**: Fills with zeros until offset `0x60` (96).
+3.  **Protected Mode Stub**: Segment setup and jump to kernel.
 4.  **Padding 2**: Fills with zeros until offset `400`.
 5.  **GDT Data**: Writes the descriptor table and the GDT pointer structure.
 6.  **Final Padding**: Fills with zeros until byte 510.
-7.  **Boot Signature**: Writes `0x55 0xAA` at bytes 511-512, marking the disk as bootable.
+7.  **Boot Signature**: Writes `0x55 0xAA` at bytes 511-512.
